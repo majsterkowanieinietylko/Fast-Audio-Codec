@@ -23,6 +23,7 @@ Files in this package are:
 - <b>FAC.js</b>: Complete Fast Audio Codec software, JavaScript version. Python module written in C coming in the future.
 - <b>QOA-modif.js</b>: Modified QOA codec software, JavaScript version.
 - <b>Codec_tester_html</b>: Basic browser interface for testing FAC, QOA and ADPCM. Just run it in your web browser.
+- <b>comparison folder</b>: Audio tracks encoded by FAC, ADPCM and QOA. Encoding settings marked in file names, original tracks included.
 
 # Details
 
