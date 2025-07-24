@@ -1,0 +1,1527 @@
+<!--
+    Time-domain audio codec tester written by MINT: https://www.youtube.com/@__MINT_
+    
+    This file is a complete mess but still contains everything you need to test ADPCM, FAC and QOA codecs.
+    First, open the console (F12). Then, open input audio file with the help of "Select file" button.
+    Audio can be either 8-bit unsigned PCM or 16-bit signed PCM, mono or stereo. After seeing in the console
+    that the file was loaded, call the function:
+    
+    - ADPCM2_8()  for testing the 8-bit ADPCM using 2 bits per sample. (8-bit unsigned PCM input)
+    - ADPCM4_8()  for testing the 8-bit ADPCM using 4 bits per sample. (8-bit unsigned PCM input)
+    - ADPCM2_16()  for testing the 16-bit ADPCM using 2 bits per sample. (16-bit signed PCM input)
+    - ADPCM4_16()  for testing the 16-bit ADPCM using 4 bits per sample. (16-bit signed PCM input)
+    - FAC(BPS, quality, analyze)  for testing the Fast Audio Codec.
+        @ BPS - bits per sample, can be from 1 to 4.
+        @ quality - quality setting. 0 implies using fast 8-bit encoder, value from range [1, 10].
+            implies using the slower encoder. The higher the value, the better the sound quality.
+        @ analyze - when set to true, some error analyzis results are displayed.
+        
+    - QOA(BPS)  for testing the QOA codec. (16-bit signed PCM input)
+        @ BPS - bits per sample, can be from 1 to 4. Set to 3 for testing the original QOA.
+        
+    If everything goes right, you will see "Ready for playback." message after processing is done.
+    Unfoucus the console (simply click somewhere else on the site) and hit the space to play processed audio.
+    Hit the space again to stop the playback. Audio can be played only once after encoding.
+    
+    Call SAVE() function to convert processed audio into the WAV file. Then click "Download converted file"
+    to download it for analyzis / further processing.
+    
+    This whole contraption was used during the development of FAC and modified version of QOA. It contains
+    much more than what I've listed above, including functions for brute-force parameter value optimization.
+    Have fun checking that out!
+    
+    Since this is a contraption, it comes with absolutely no warranty!
+-->
+
+<!DOCTYPE html>
+<html lang="en-EN">
+<head>
+<meta charset="UTF-8">
+<title>ADPCM tester</title>
+<script type="text/javascript" src="FAC.js"></script>
+<script type="text/javascript" src="QOA-modif.js"></script>
+<script type="text/javascript">
+
+let samplesL = [];
+let samplesR = [];
+let rawL = [];
+let rawR = [];
+let raw_enc = [];
+let enc_dataSize = 0;
+let samplingRate = 0;
+let audioChannels = 0;
+let dataWidth = 0;
+let audioBytes = 0;
+let audioSamples = 0;
+let lengthSeconds = 0;
+let loadedName = "";
+let playBuffer;
+let previewReady = false;
+let playing = false;
+
+function id(what)
+ {
+ return document.getElementById(what);
+ }
+ 
+class Timer
+ {
+ constructor()
+  {
+  this.startStamp = 0;
+  this.measured = 0;
+  }
+ start()
+  {
+  this.startStamp = performance.now();
+  }
+ stop()
+  {
+  this.measured += performance.now() - this.startStamp;
+  }
+ reset()
+  {
+  this.measured = 0;
+  }
+ get seconds()
+  {
+  return (this.measured / 1000).toFixed(3) + "s";
+  }
+ }
+
+function run()
+ {
+ id("sound").addEventListener("input", function()
+  {
+  let loader = new FileReader();
+  let audio = this.files[0];
+  loadedName = audio.name;
+  let ind = loadedName.indexOf(".wav");
+  if(ind != -1)
+   {
+   loadedName = loadedName.substring(0, ind);
+   }
+  this.value = null;
+  if(audio === undefined)
+   {
+   return;
+   }
+  loader.readAsArrayBuffer(audio);
+  loader.onload = function()
+   {
+   let data = loader.result;
+   let contents = new Uint8Array(data);
+   let header = [82, 73, 70, 70, 87, 65, 86, 69, 102, 109, 116, 32, 100, 97, 116, 97];
+   let indexes = [0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 36, 37, 38, 39];
+   let pointer = 0;
+   for(let i of indexes)
+    {
+	if(contents[i] != header[pointer++])
+	 {
+	 console.warn("Invalid file format");
+	 return;
+	 }
+	}
+   let totalSize = contents[7];
+   for(let i=0; i<3; i++)
+    {
+	totalSize <<= 8;
+	totalSize |= contents[6 - i]
+	}
+   totalSize += 8;
+   let channels = (contents[23] << 8) | contents[22];
+   let sampling = (contents[26] << 16) | (contents[25] << 8) | contents[24];
+   let dataSize = contents[34];
+   let dataSectionSize = contents[43];
+   for(let i=0; i<3; i++)
+    {
+	dataSectionSize <<= 8;
+	dataSectionSize |= contents[42 - i]
+	}
+   if(totalSize > 2 ** 30 || dataSectionSize > 2 ** 30 - 44)
+    {
+	console.warn("Too big file (<= 1GB)");
+	return;
+	}
+   let validSizes = [8, 16, 24];
+   if(channels < 1 || channels > 2 || validSizes.indexOf(dataSize) == -1)
+    {
+	console.warn("Invalid parameters");
+	return;
+	}
+   dataSize /= 8;
+   dataWidth = dataSize;
+   audioChannels = channels;
+   samplingRate = sampling;
+   audioBytes = dataSectionSize;
+   audioSamples = parseInt(dataSectionSize / (dataSize * channels));
+   lengthSeconds = audioSamples / samplingRate;
+   console.log("Values: " + audioSamples + "; duration: " + lengthSeconds.toFixed(1) + "s");
+   samplesL = new Int32Array(audioSamples);
+   samplesR = new Int32Array(audioSamples);
+   let samplePointer = 44;
+   let firstBit = 1 << (dataSize * 8 - 1);
+   for(let i=0; i<audioSamples; i++)
+    {
+	for(let j=0; j<channels; j++)
+	 {
+	 let single = contents[samplePointer + dataSize - 1];
+	 for(let k=dataSize-2; k>=0; k--)
+	  {
+	  single <<= 8;
+	  single |= contents[samplePointer + k];
+	  }
+	 if(dataSize > 1)
+	  {
+	  single -= (single & firstBit) << 1;
+      }
+	 else
+	  {
+	  single -= 128;
+	  }
+     j ? samplesR[i] = single : samplesL[i] = single;
+	 samplePointer += dataSize;
+	 }
+	}
+   console.log("Audio loaded successfully");
+   }
+  });
+  window.addEventListener("keydown", function(event)
+   {
+   if(!previewReady){return;}
+   if(event.key != " "){return;}
+   playing ? playBuffer.stop() : playBuffer.start();
+   playing = !playing;
+   });
+ }
+
+const IndexTable2 = [-1, 2, -1, 2];
+const IndexTable4 = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
+const IndexTable8 = [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32];
+
+const StepSizeTable16 = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+        50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230,
+        253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+        1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327,
+        3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487,
+        12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+    ];
+	
+const StepSizeTable8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 49, 54, 60, 66, 72, 79, 87, 96, 106, 116, 128];
+
+
+function clip(val, limitU, limitL)
+ {
+ if(val > limitU)
+  {
+  return limitU;
+  }
+ if(val < limitL)
+  {
+  return limitL;
+  }
+ return val;
+ }
+
+function clip16(val)
+ {
+ return val < -32768 ? -32768 : val > 32767 ? 32767 : val;
+ }
+
+function clip8(val)
+ {
+ return val < -128 ? -128 : val > 127 ? 127 : val;
+ }
+
+function ADPCM_E_2_16(data)
+ {
+ let pred_sample = 50;
+ let index = 0;
+ let adpcm_samples = [];
+ for(let i=0; i<data.length; i++)
+  {
+  let step = StepSizeTable16[index];
+  let diff = data[i] - pred_sample;
+  let code;
+  if(diff >= 0){code = 0;}
+  else{code = 2; diff = -diff;}
+  let diff_q = step >> 1;
+  if(diff >= step)
+   {
+   code |= 1;
+   diff_q += step;
+   }
+  code & 2 ? pred_sample -= diff_q : pred_sample += diff_q;
+  pred_sample = clip16(pred_sample);
+  index += IndexTable2[code];
+  index = clip(index, StepSizeTable16.length - 1, 0);
+  adpcm_samples.push(code & 3);
+  }
+ return adpcm_samples;
+ }
+ 
+function ADPCM_D_2_16(data) {
+    let pred_sample = 0;
+    let index = 0;
+    let decoded_samples = [];
+    for(let i=0; i<data.length; i++) {
+        let step = StepSizeTable16[index];
+        let code = data[i];
+        let diff_q = step >> 1;
+        if(code & 1) diff_q += step;
+        code & 2 ? pred_sample -= diff_q : pred_sample += diff_q;
+        pred_sample = clip16(pred_sample);
+        index += IndexTable2[code];
+        index = clip(index, StepSizeTable16.length - 1, 0);
+        decoded_samples.push(pred_sample);
+    }
+    return decoded_samples;
+}
+
+function ADPCM2_16()
+ {
+ previewReady = false;
+ console.log("Encoding channel L...");
+ let Et = new Timer();
+ let Dt = new Timer();
+ Et.start();
+ let ADPCM_L = ADPCM_E_2_16(samplesL);
+ Et.stop();
+ raw_enc = ADPCM_L;
+ enc_dataSize = 2;
+ console.log("Decoding channel L...");
+ Dt.start();
+ rawL = ADPCM_D_2_16(ADPCM_L);
+ Dt.stop();
+ if(audioChannels == 2)
+  {
+  console.log("Encoding channel R...");
+  Et.start();
+  let ADPCM_R = ADPCM_E_2_16(samplesR);
+  Et.stop();
+  console.log("Decoding channel R...");
+  Dt.start();
+  rawR = ADPCM_D_2_16(ADPCM_R);
+  Dt.stop();
+  }
+ console.log("Encoded in " + Et.seconds);
+ console.log("Decoded in " + Dt.seconds);
+ console.log("Bitrate: " + Math.round(audioBytes / (8 * 128 * lengthSeconds)) + " kbit/s");
+ PLAY(16);
+ }
+ 
+
+function ADPCM_ED_2_16_LMS(data)
+ {
+ let weights = new Array(4).fill(0);
+ let history = new Array(4).fill(0);
+ let index = 0;
+ let decoded_samples = [];
+ for(let i=0; i<data.length; i++)
+  {
+  let predicted = lms_predict(weights, history, 13);
+  let diff = data[i] - predicted;
+  let step = StepSizeTable16[index];
+  let code;
+  if(diff >= 0){code = 0;}
+  else{code = 2; diff = -diff;}
+  let diff_q = step >> 1;
+  if(diff >= step)
+   {
+   code |= 1;
+   diff_q += step;
+   }
+  if(code & 2){diff_q = -diff_q;}
+  predicted += diff_q;
+  predicted = clip16(predicted);
+  lms_update(weights, history, predicted, diff_q, 4);
+  index += IndexTable2[code];
+  index = clip(index, StepSizeTable16.length - 1, 0);
+  decoded_samples.push(predicted);
+  }
+ return decoded_samples;
+ }
+
+
+function ADPCM2_16_LMS()
+ {
+ previewReady = false;
+ console.log("Encoding channel L...");
+ let Et = new Timer();
+ Et.start();
+ rawL = ADPCM_ED_2_16_LMS(samplesL);
+ Et.stop();
+ if(audioChannels == 2)
+  {
+  console.log("Encoding channel R...");
+  Et.start();
+  rawR = ADPCM_ED_2_16_LMS(samplesR);
+  Et.stop();
+  }
+ console.log("Processed in " + Et.seconds);
+ PLAY(16);
+ }
+ 
+
+function ADPCM_E_2_8(data)
+ {
+ let pred_sample = 0;
+ let index = 0;
+ let adpcm_samples = [];
+ for(let i=0; i<data.length; i++)
+  {
+  let step = StepSizeTable8[index];
+  let diff = data[i] - pred_sample;
+  let code;
+  if(diff >= 0){code = 0;}
+  else{code = 2; diff = -diff;}
+  let diff_q = step >> 1;
+  if(diff >= step)
+   {
+   code |= 1;
+   diff_q += step;
+   }
+  code & 2 ? pred_sample -= diff_q : pred_sample += diff_q;
+  pred_sample = clip8(pred_sample);
+  index += IndexTable2[code];
+  index = clip(index, StepSizeTable8.length - 1, 0);
+  adpcm_samples.push(code & 3);
+  }
+ return adpcm_samples;
+ }
+ 
+function ADPCM_D_2_8(data)
+ {
+ let pred_sample = 0;
+ let index = 0;
+ let decoded_samples = [];
+ for(let i=0; i<data.length; i++)
+  {
+  let step = StepSizeTable8[index];
+  let code = data[i];
+  let diff_q = step >> 1;
+  if(code & 1){diff_q += step;}
+  code & 2 ? pred_sample -= diff_q : pred_sample += diff_q;
+  pred_sample = clip8(pred_sample);
+  index += IndexTable2[code];
+  index = clip(index, StepSizeTable8.length - 1, 0);
+  decoded_samples.push(pred_sample);
+  }
+ return decoded_samples;
+ }
+
+ 
+function ADPCM2_8()
+ {
+ previewReady = false;
+ console.log("Encoding channel L...");
+ let Et = new Timer();
+ let Dt = new Timer();
+ Et.start();
+ let ADPCM_L = ADPCM_E_2_8(samplesL);
+ Et.stop();
+ raw_enc = ADPCM_L;
+ enc_dataSize = 2;
+ console.log("Decoding channel L...");
+ Dt.start();
+ rawL = ADPCM_D_2_8(ADPCM_L);
+ Dt.stop();
+ if(audioChannels == 2)
+  {
+  console.log("Encoding channel R...");
+  Et.start();
+  let ADPCM_R = ADPCM_E_2_8(samplesR);
+  Et.stop();
+  console.log("Decoding channel R...");
+  Dt.start();
+  rawR = ADPCM_D_2_8(ADPCM_R);
+  Dt.stop();
+  }
+ console.log("Encoded in " + Et.seconds);
+ console.log("Decoded in " + Dt.seconds);
+ console.log("Bitrate: " + Math.round(audioBytes / (4 * 128 * lengthSeconds)) + " kbit/s");
+ PLAY(8);
+ }
+ 
+ 
+let hist;
+
+function ADPCM_E_4_16(data)
+ {
+ let pred_sample = 0;
+ let index = 0;
+ let adpcm_samples = [];
+ //hist = new Array(StepSizeTable16.length).fill(0);
+ for(let i=0; i<data.length; i++)
+  {
+  let step = StepSizeTable16[index];
+  //hist[index]++;
+  let diff = data[i] - pred_sample;
+  let code;
+  if(diff >= 0){code = 0;}
+  else{code = 8; diff = -diff;}
+  let diff_q = step >> 3;
+  for(let j=4; j>0; j>>=1)
+   {
+   if(diff >= step)
+    {
+    code |= j;
+    diff -= step;
+    diff_q += step;
+    }
+   step >>= 1;
+   }
+  code & 8 ? pred_sample -= diff_q : pred_sample += diff_q;
+  pred_sample = clip16(pred_sample);
+  index += IndexTable4[code];
+  index = clip(index, StepSizeTable16.length - 1, 6);
+  adpcm_samples.push(code & 15);
+  }
+ //console.log(hist);
+ return adpcm_samples;
+ }
+
+function ADPCM_D_4_16(data) {
+    let pred_sample = 0;
+    let index = 0;
+    let decoded_samples = [];
+    for(let i=0; i<data.length; i++) {
+        let step = StepSizeTable16[index];
+        let diff_q = step >> 3;
+        let code = data[i];
+        for(let j=4; j>0; j>>=1) {
+            if(code & j) {
+                diff_q += step;
+            }
+            step >>= 1;
+        }
+        code & 8 ? pred_sample -= diff_q : pred_sample += diff_q;
+        pred_sample = clip16(pred_sample);
+        index += IndexTable4[code];
+        index = clip(index, StepSizeTable16.length - 1, 6);
+        decoded_samples.push(pred_sample);
+    }
+    return decoded_samples;
+}
+
+
+function ADPCM_E_8_16(data)
+ {
+ let pred_sample = 0;
+ let index = 0;
+ let adpcm_samples = [];
+ //hist = new Array(StepSizeTable16.length).fill(0);
+ for(let i=0; i<data.length; i++)
+  {
+  let step = StepSizeTable16[index];
+  //hist[index]++;
+  let diff = data[i] - pred_sample;
+  let code;
+  if(diff >= 0){code = 0;}
+  else{code = 128; diff = -diff;}
+  let diff_q = step >> 7;
+  for(let j=64; j>0; j>>=1)
+   {
+   if(diff >= step)
+    {
+    code |= j;
+    diff -= step;
+    diff_q += step;
+    }
+   step >>= 1;
+   }
+  code & 128 ? pred_sample -= diff_q : pred_sample += diff_q;
+  pred_sample = clip16(pred_sample);
+  index += IndexTable8[(code & 127) >> 2];
+  //index += IndexTable4[code >> 4];
+  index = clip(index, StepSizeTable16.length - 1, 35);
+  adpcm_samples.push(code & 255);
+  }
+ //console.log(hist);
+ return adpcm_samples;
+ }
+
+function ADPCM_D_8_16(data)
+ {
+ let pred_sample = 0;
+ let index = 0;
+ let decoded_samples = [];
+ for(let i=0; i<data.length; i++)
+  {
+  let step = StepSizeTable16[index];
+  let diff_q = step >> 7;
+  let code = data[i];
+  for(let j=64; j>0; j>>=1)
+   {
+   if(code & j)
+    {
+    diff_q += step;
+    }
+   step >>= 1;
+   }
+  code & 128 ? pred_sample -= diff_q : pred_sample += diff_q;
+  pred_sample = clip16(pred_sample);
+  index += IndexTable8[(code & 127) >> 2];
+  //index += IndexTable4[code >> 4];
+  index = clip(index, StepSizeTable16.length - 1, 35);
+  decoded_samples.push(pred_sample);
+  }
+ return decoded_samples;
+ }
+ 
+function getEncodingError(originalSamples, decodedSamples)
+ {
+ let total = 0;
+ for(let i=0; i<originalSamples.length; i++)
+  {
+  total += Math.pow(originalSamples[i] - decodedSamples[i], 2);
+  }
+ return total;
+ }
+
+
+function ADPCM_E_4_16_M(data)
+ {
+ let pred_sample = 0;
+ let index = 0;
+ let adpcm_samples = [];
+ for(let i=0; i<data.length-1; i++)
+  {
+  let minErr = Infinity;
+  let minAt = 0;
+  let sign = (data[i] - pred_sample < 0) ? 8 : 0;
+  for(let j=0; j<8; j++)
+   {
+   let testCode = j | sign;
+   let testDecoded = decodeNext(testCode, pred_sample, index);
+   let tempNext = testDecoded.decoded;
+   let tempIndex = testDecoded.index;
+   let testEncoded = encodeNext(data[i + 1], tempNext, tempIndex);
+   let totalErr = getEncodingError([data[i], data[i + 1]], [tempNext, testEncoded.decoded]);
+   if(totalErr < minErr)
+    {
+	minErr = totalErr;
+	minAt = j;
+	}
+   }
+  let bestCode = minAt | sign;
+  let contextData = decodeNext(bestCode, pred_sample, index);
+  index = contextData.index;
+  pred_sample = contextData.decoded;
+  adpcm_samples.push(bestCode);
+  }
+ return adpcm_samples;
+ }
+
+function ADPCM_D_4_16_M(data)
+ {
+ let pred_sample = 0;
+ let index = 0;
+ let decoded_samples = [];
+ for(let i=0; i<data.length; i++)
+  {
+  let nextSample = decodeNext(data[i], pred_sample, index);
+  pred_sample = nextSample.decoded;
+  index = nextSample.index;
+  decoded_samples.push(pred_sample);
+  }
+ return decoded_samples;
+ }
+ 
+function encodeNext(sample, prevSample, index)
+ {
+ let step = StepSizeTable16[index];
+ let diff = sample - prevSample;
+ let code;
+ if(diff >= 0){code = 0;}
+ else{code = 8; diff = -diff;}
+ let diff_q = step >> 3;
+ for(let j=4; j>0; j>>=1)
+  {
+  if(diff >= step)
+   {
+   code |= j;
+   diff -= step;
+   diff_q += step;
+   }
+  step >>= 1;
+  }
+ code & 8 ? prevSample -= diff_q : prevSample += diff_q;
+ prevSample = clip16(prevSample);
+ index += IndexTable4[code];
+ index = clip(index, StepSizeTable16.length - 1, 6);
+ return {code, decoded: prevSample, index};
+ }
+ 
+function decodeNext(code, prevSample, index)
+ {
+ let step = StepSizeTable16[index];
+ let diff_q = step >> 3;
+ for(let j=4; j>0; j>>=1)
+  {
+  if(code & j)
+   {
+   diff_q += step;
+   }
+  step >>= 1;
+  }
+ code & 8 ? prevSample -= diff_q : prevSample += diff_q;
+ prevSample = clip16(prevSample);
+ index += IndexTable4[code];
+ index = clip(index, StepSizeTable16.length - 1, 6);
+ return {decoded: prevSample, index};
+ }
+
+function ADPCM4_16M()
+ {
+ previewReady = false;
+ console.log("Encoding channel L...");
+ let ADPCM_L = ADPCM_E_4_16_M(samplesL);
+ console.log("Decoding channel L...");
+ rawL = ADPCM_D_4_16_M(ADPCM_L);
+ if(audioChannels == 2)
+  {
+  console.log("Encoding channel R...");
+  let ADPCM_R = ADPCM_E_4_16_M(samplesR);
+  console.log("Decoding channel R...");
+  rawR = ADPCM_D_4_16_M(ADPCM_R);
+  }
+ PLAY(16);
+ }
+
+function ADPCM4_16()
+ {
+ previewReady = false;
+ console.log("Encoding channel L...");
+ let Et = new Timer();
+ let Dt = new Timer();
+ Et.start();
+ let ADPCM_L = ADPCM_E_4_16(samplesL);
+ Et.stop();
+ console.log("Decoding channel L...");
+ Dt.start();
+ rawL = ADPCM_D_4_16(ADPCM_L);
+ Dt.stop();
+ if(audioChannels == 2)
+  {
+  console.log("Encoding channel R...");
+  Et.start();
+  let ADPCM_R = ADPCM_E_4_16(samplesR);
+  Et.stop();
+  console.log("Decoding channel R...");
+  Dt.start();
+  rawR = ADPCM_D_4_16(ADPCM_R);
+  Dt.stop();
+  }
+ console.log("Encoded in " + Et.seconds);
+ console.log("Decoded in " + Dt.seconds);
+ console.log("Bitrate: " + Math.round(audioBytes / (4 * 128 * lengthSeconds)) + " kbit/s");
+ PLAY(16);
+ }
+ 
+function ADPCM8_16()
+ {
+ previewReady = false;
+ console.log("Encoding channel L...");
+ let Et = new Timer();
+ let Dt = new Timer();
+ Et.start();
+ let ADPCM_L = ADPCM_E_8_16(samplesL);
+ Et.stop();
+ console.log("Decoding channel L...");
+ Dt.start();
+ rawL = ADPCM_D_8_16(ADPCM_L);
+ Dt.stop();
+ if(audioChannels == 2)
+  {
+  console.log("Encoding channel R...");
+  Et.start();
+  let ADPCM_R = ADPCM_E_8_16(samplesR);
+  Et.stop();
+  console.log("Decoding channel R...");
+  Dt.start();
+  rawR = ADPCM_D_8_16(ADPCM_R);
+  Dt.stop();
+  }
+ console.log("Encoded in " + Et.seconds);
+ console.log("Decoded in " + Dt.seconds);
+ PLAY(16);
+ }
+
+function ADPCM_E_4_8(data)
+ {
+ let pred_sample = 0;
+ let index = 0;
+ let adpcm_samples = [];
+ for(let i=0; i<data.length; i++)
+  {
+  let step = StepSizeTable8[index];
+  let diff = data[i] - pred_sample;
+  let code;
+  if(diff >= 0){code = 0;}
+  else{code = 8; diff = -diff;}
+  let diff_q = step >> 3;
+  for(let j=4; j>0; j>>=1)
+   {
+   if(diff >= step)
+    {
+    code |= j;
+    diff -= step;
+    diff_q += step;
+    }
+   step >>= 1;
+   }
+  code & 8 ? pred_sample -= diff_q : pred_sample += diff_q;
+  pred_sample = clip8(pred_sample);
+  index += IndexTable4[code];
+  index = clip(index, StepSizeTable8.length - 1, 6);
+  adpcm_samples.push(code & 15);
+  }
+ return adpcm_samples;
+ }
+
+function ADPCM_D_4_8(data)
+ {
+ let pred_sample = 0;
+ let index = 0;
+ let decoded_samples = [];
+ for(let i=0; i<data.length; i++)
+  {
+  let step = StepSizeTable8[index];
+  let diff_q = step >> 3;
+  let code = data[i];
+  for(let j=4; j>0; j>>=1)
+   {
+   if(code & j)
+    {
+    diff_q += step;
+    }
+   step >>= 1;
+   }
+  code & 8 ? pred_sample -= diff_q : pred_sample += diff_q;
+  pred_sample = clip8(pred_sample);
+  index += IndexTable4[code];
+  index = clip(index, StepSizeTable8.length - 1, 6);
+  decoded_samples.push(pred_sample);
+  }
+ return decoded_samples;
+ }
+
+function ADPCM4_8()
+ {
+ previewReady = false;
+ console.log("Encoding channel L...");
+ let Et = new Timer();
+ let Dt = new Timer();
+ Et.start();
+ let ADPCM_L = ADPCM_E_4_8(samplesL);
+ Et.stop();
+ console.log("Decoding channel L...");
+ Dt.start();
+ rawL = ADPCM_D_4_8(ADPCM_L);
+ Dt.stop();
+ if(audioChannels == 2)
+  {
+  console.log("Encoding channel R...");
+  Et.start();
+  let ADPCM_R = ADPCM_E_4_8(samplesR);
+  Et.stop();
+  console.log("Decoding channel R...");
+  Dt.start();
+  rawR = ADPCM_D_4_8(ADPCM_R);
+  Dt.stop();
+  }
+ console.log("Encoded in " + Et.seconds);
+ console.log("Decoded in " + Dt.seconds);
+ console.log("Bitrate: " + Math.round(audioBytes / (2 * 128 * lengthSeconds)) + " kbit/s");
+ PLAY(16);
+ }
+ 
+function ADPCM2_8_M(chunkSize)
+ {
+ previewReady = false;
+ const frames = Math.floor(audioSamples / chunkSize);
+ rawL = [];
+ rawR = [];
+ let offset = 0;
+ console.log("Encoding...");
+ let meas = new Timer();
+ meas.start();
+ for(let i=0; i<frames; i++)
+  {
+  ADPCM_frame(samplesL, chunkSize, offset, rawL);
+  if(audioChannels == 2)
+   {
+   ADPCM_frame(samplesR, chunkSize, offset, rawR);
+   }
+  offset += chunkSize;
+  }
+ meas.stop();
+ console.log("Encoded in " + meas.seconds);
+ PLAY(8);
+ }
+ 
+function ADPCM_frame(samples, size, offset, result)
+ {
+ let maxDiff = 0;
+ let avgDiff = 0;
+ let prev = samples[offset];
+ for(let i=0; i<size; i++) {
+	const current = samples[offset + i];
+	const diff = current - prev;
+	let absDiff = diff < 0 ? -diff : diff;
+	avgDiff += absDiff;
+	prev = current;
+	if(absDiff > maxDiff) {
+		maxDiff = absDiff;
+	}
+ }
+ avgDiff /= size;
+ let tableIndex = -1;
+ for(let i=0; i<StepSizeTable8.length; i++)
+  {
+  tableIndex++;
+  if(StepSizeTable8[i] >= maxDiff){break;}
+  }
+ let pred_sample = samples[offset];
+ let index = tableIndex;
+ for(let i=0; i<size; i++)
+  {
+  let step = StepSizeTable8[index];
+  let sample = samples[offset + i];
+  let diff = sample - pred_sample;
+  let code;
+  if(diff >= 0){code = 0;}
+  else{code = 2; diff = -diff;}
+  let diff_q = step >> 1;
+  if(diff >= step)
+   {
+   code |= 1;
+   diff_q += step;
+   }
+  code & 2 ? pred_sample -= diff_q : pred_sample += diff_q;
+  pred_sample = clip8(pred_sample);
+  index += IndexTable2[code];
+  index = clip(index, StepSizeTable8.length - 1, 0);
+  result.push(pred_sample);
+  }
+ }
+ 
+function QOA(BPS)
+ {
+ rawL = [];
+ rawR = [];
+ let audioData = {sampleRate: samplingRate, bitsPerSample: BPS};
+ let sampleData = [new Int16Array(samplesL)];
+ if(audioChannels == 2)
+  {
+  sampleData.push(new Int16Array(samplesR));
+  }
+ audioData.channelData = sampleData;
+ console.log("Encoding...");
+ let Et = new Timer();
+ Et.start();
+ let encoded = qoa_encode(audioData);
+ Et.stop();
+ let byteSize = encoded.length;
+ let ratio = (audioBytes + 44) / byteSize;
+ console.log("Encoded size: " + (byteSize / 1048576).toFixed(2) + " MB. Compression ratio: " + ratio.toFixed(2));
+ console.log("Bitrate: " + Math.round(byteSize / (128 * lengthSeconds)) + " kbit/s");
+ raw_enc = encoded;
+ enc_dataSize = 8;
+ console.log("Decoding...");
+ let Dt = new Timer();
+ Dt.start();
+ let decoded = qoa_decode(encoded);
+ Dt.stop();
+ rawL = decoded.channelData[0];
+ if(audioChannels == 2)
+  {
+  rawR = decoded.channelData[1];
+  }
+ console.log("Encoded in " + Et.seconds);
+ console.log("Decoded in " + Dt.seconds);
+ PLAY(16);
+ }
+
+let analyze_result = [];
+
+function FAC(BPS, quality, analyze)
+ {
+ let audioData = {sampleRate: samplingRate, bitDepth: dataWidth * 8, bitsPerSample: BPS, quality: quality, slice_len: 22};
+ let sampleData = [new Int16Array(samplesL)];
+ if(audioChannels == 2)
+  {
+  sampleData.push(new Int16Array(samplesR));
+  }
+ audioData.channelData = sampleData;
+ console.log("Encoding...");
+ let Et = new Timer();
+ Et.start();
+ let encoded = fac_encode(audioData);
+ Et.stop();
+ console.log("Encoded in " + Et.seconds);
+ let byteSize = encoded.length;
+ let ratio = (audioBytes + 44) / byteSize;
+ console.log("Encoded size: " + (byteSize / 1048576).toFixed(2) + " MB. Compression ratio: " + ratio.toFixed(2));
+ console.log("Bitrate: " + Math.round(byteSize / (128 * lengthSeconds)) + " kbit/s");
+ raw_enc = encoded;
+ enc_dataSize = 8;
+ console.log("Decoding...");
+ let Dt = new Timer();
+ Dt.start();
+ let decoded = fac_decode(encoded);
+ Dt.stop();
+ rawL = decoded.channelData[0];
+ if(audioChannels == 2)
+  {
+  rawR = decoded.channelData[1];
+  }
+ console.log("Decoded in " + Dt.seconds);
+ if(!analyze) {
+	PLAY(dataWidth * 8);
+	return;
+ }
+ console.log("Analyzing errors...");
+ analyze_result = [];
+ const frames = Math.floor(rawL.length / 256);
+ const weights = get_mult_curve(samplingRate);
+ let offset = 0;
+ let avgError = 0;
+ let worst = 0;
+ let worst_pos = 0;
+ let worst_orig = [];
+ let worst_dec = [];
+ for(let i=0; i<frames; i++) {
+	const orig = sampleData[0].slice(offset, offset + 256);
+	const dec = rawL.slice(offset, offset + 256);
+	const error = frame_error(orig, dec, weights, samplingRate);
+	if(error > worst) {
+		worst = error;
+		worst_pos = i;
+		worst_orig = orig;
+		worst_dec = dec;
+	}
+	avgError += error;
+	analyze_result.push(error);
+	offset += 256;
+ }
+ avgError /= frames;
+ console.log("Done. Avg error: " + avgError);
+ console.log("Worst error: " + worst + " (" + worst_pos + ")");
+ console.log("Audio frame that gave the worst encoding error:");
+ console.log(normalArray(worst_orig));
+ console.log("It was decoded to:");
+ console.log(normalArray(worst_dec));
+ console.log("Errors for each audio frame:");
+ console.log(analyze_result);
+ PLAY(dataWidth * 8);
+ return avgError + worst * 0.2;
+ }
+ 
+function best_mapping(BPS) {
+	console.warn("I really recommend you to comment a lot \"console.log()\" before running this...");
+	return;
+	const defaults = [24, 1, 96, 8];
+	const lower_lim = [16, 1, 32, 0];
+	const upper_lim = [64, 1, 128, 16];
+	let best_sol = [...defaults];
+	let args = [1, 1, 1, defaults[0], 1, ...defaults.slice(1, 3), 1, defaults[3]];
+	let default_table = dequant_lookup(BPS, 8, args);
+	let best_table = default_table;
+	dequant_tab_fast[BPS - 1] = default_table;
+	let best_err = FAC(BPS, 0, 1);
+	let temperature = 100;
+	const points = Math.round(8.926179 * Math.pow(4, 2.163885));
+	const cooling = Math.pow(0.2 / temperature, 1 / (points - 20));
+	let progress = [];
+	let percentBef = 1;
+	for(let i=0; i<points; i++) {
+		let tested_sol = next_solution(best_sol, lower_lim, upper_lim, temperature);
+		tested_sol[3] = Math.round(tested_sol[3]); // this has to be an integer
+		args = [1, 1, 1, tested_sol[0], 1, ...tested_sol.slice(1, 3), 1, tested_sol[3]];
+		let table = dequant_lookup(BPS, 8, args);
+		dequant_tab_fast[BPS - 1] = table;
+		let new_err = FAC(BPS, 0, 1);
+		progress.push(new_err);
+		if(new_err < best_err) {
+			best_err = new_err;
+			best_sol = tested_sol;
+			best_table = table;
+		}
+		if(i > 18) {
+			temperature *= cooling;
+		}
+		let percent = Math.round(i / points * 10);
+		if(percent != percentBef) {
+			percentBef = percent;
+			console.log(percent * 10 + "%");
+		}
+	}
+	console.log(best_table, best_sol, progress);
+	return FAC(BPS, 0, 0);
+}
+
+function get_mapping(sizes) {
+	let current = 0;
+	let result = [];
+	for(let i=0; i<sizes.length; i++) {
+		for(let j=0; j<Math.round(sizes[i]); j++) {
+			result.push(current);
+		}
+		current++;
+	}
+	return result;
+}
+
+function check_mapping(BPS) {
+	let result = [];
+	for(let i=-128; i<128; i++) {
+		let scf = Math.min(Math.abs(i) >> 3, 15);
+		let scaled = (i * inverse_tab_fast[scf] + 64) >> 7;
+		if(BPS == 1 && scaled == 0 && i < 0){scaled = -1;}
+		scaled = Math.max(-8, Math.min(8, scaled));
+		let mapped_to = dequant_tab_fast[BPS - 1][scf][quant_tab_fast[BPS - 1][scaled + 8]];
+		result.push(i + " -> " + mapped_to);
+	}
+	return result;
+}
+
+function FAC8_sliced(BPS, divideInto)
+ {
+ let audioData = {sampleRate: samplingRate, bitsPerSample: BPS};
+ let singleLen = Math.floor(samplesL.length / divideInto);
+ let dividedStream = [];
+ for(let i=0; i<divideInto; i++)
+  {
+  let singleL = new Int8Array(singleLen);
+  for(let j=0; j<singleLen; j++)
+   {
+   singleL[j] = samplesL[j * divideInto + i];
+   }
+  dividedStream.push(singleL);
+  if(audioChannels == 2)
+   {
+   let singleR = new Int8Array(singleLen);
+   for(let j=0; j<singleLen; j++)
+    {
+    singleR[j] = samplesR[j * divideInto + i];
+    }
+   dividedStream.push(singleR);
+   }
+  }
+ audioData.channelData = dividedStream;
+ console.log("Encoding...");
+ let Et = new Timer();
+ Et.start();
+ let encoded = fac_encode(audioData);
+ Et.stop();
+ let byteSize = encoded.length;
+ let ratio = (audioBytes + 44) / byteSize;
+ console.log("Encoded size: " + (byteSize / 1048576).toFixed(2) + " MB. Compression ratio: " + ratio.toFixed(2));
+ raw_enc = encoded;
+ enc_dataSize = 8;
+ console.log("Decoding...");
+ let Dt = new Timer();
+ Dt.start();
+ let decoded = fac_decode(encoded);
+ Dt.stop();
+ console.log(decoded);
+ rawL = new Array(singleLen * divideInto);
+ rawR = new Array(singleLen * divideInto);
+ const received = decoded.channelData;
+ for(let i=0; i<divideInto; i++)
+  {
+  for(let j=0; j<singleLen; j++)
+   {
+   rawL[j * divideInto + i] = received[i * 2][j];
+   if(audioChannels == 2)
+    {
+    rawR[j * divideInto + i] = received[i * 2 + 1][j];
+    }
+   }
+  }
+ console.log("Encoded in " + Et.seconds);
+ console.log("Decoded in " + Dt.seconds);
+ PLAY(8);
+ }
+
+function PLAY(inputBitWidth)
+ {
+ let realTimePlayer = new AudioContext({samplingRate});
+ let audioBuffer = realTimePlayer.createBuffer(audioChannels, audioSamples, samplingRate);
+ audioBuffer.copyToChannel(normalize(rawL, inputBitWidth), 0);
+ if(audioChannels == 2)
+  {
+  audioBuffer.copyToChannel(normalize(rawR, inputBitWidth), 1);
+  }
+ playBuffer = realTimePlayer.createBufferSource();
+ playBuffer.buffer = audioBuffer;
+ playBuffer.connect(realTimePlayer.destination);
+ console.log("Ready for playback.");
+ previewReady = true;
+ playing = false;
+ }
+
+function normalize(input, bitWidth)
+ {
+ let normalized = new Float32Array(input.length);
+ let divisor = 1 << (bitWidth - 1);
+ for(let i=0; i<input.length; i++)
+  {
+  normalized[i] = input[i] / divisor;
+  }
+ return normalized;
+ }
+
+
+function SAVE()
+ {
+ let previewSize = audioSamples * audioChannels * 2 + 44;
+ console.log("Preview size: " + previewSize + "B");
+ let preview = new Uint8Array(previewSize);
+ const header = [82, 73, 70, 70, 87, 65, 86, 69, 102, 109, 116, 32, 100, 97, 116, 97];
+ const indexes = [0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 36, 37, 38, 39];
+ let readPointer = 0;
+ for(let i of indexes)
+  {
+  preview[i] = header[readPointer++];
+  }
+ for(let i=0; i<4; i++)
+  {
+  preview[i + 4] = ((previewSize - 8) >> (i << 3)) & 255;
+  }
+ preview[16] = 16;
+ preview[20] = 1;
+ preview[22] = audioChannels;
+ preview[23] = audioChannels >> 8;
+ for(let i=0; i<4; i++)
+  {
+  preview[i + 24] = (samplingRate >> (i << 3)) & 255;
+  }
+ let dataVerify1 = samplingRate * audioChannels * 2;
+ for(let i=0; i<4; i++)
+  {
+  preview[i + 28] = (dataVerify1 >> (i << 3)) & 255;
+  }
+ let dataVerify2 = audioChannels * 2;
+ preview[32] = dataVerify2 & 255;
+ preview[33] = (dataVerify2 >> 8) & 255;
+ preview[34] = 16;
+ for(let i=0; i<4; i++)
+  {
+  preview[i + 40] = ((previewSize - 44) >> (i << 3)) & 255;
+  }
+ let filePointer = 44;
+ let valueShift = 16 - dataWidth * 8;
+ for(let i=0; i<audioSamples; i++)
+  {
+  let normalizedL = rawL[i] << valueShift;
+  preview[filePointer++] = normalizedL & 255;
+  preview[filePointer++] = normalizedL >> 8;
+  if(audioChannels == 2)
+   {
+   let normalizedR = rawR[i] << valueShift;
+   preview[filePointer++] = normalizedR & 255;
+   preview[filePointer++] = normalizedR >> 8;
+   }
+  }
+ const previewFile = new Blob([preview], {type: "audio/wav"});
+ const wavURL = URL.createObjectURL(previewFile);
+ id("wavFile").setAttribute("download", loadedName.trim() + "-processed.wav");
+ id("wavFile").setAttribute("href", wavURL);
+ }
+ 
+function saveData(data, group_size)
+ {
+ rawL = [];
+ let scale = 32000 / getAbsMax(data);
+ for(let i=0; i<data.length; i++)
+  {
+  rawL.push(Math.round(data[i] * scale));
+  }
+ let saveSamples = audioSamples;
+ let saveChannels = audioChannels;
+ let saveRate = samplingRate;
+ let saveWidth = dataWidth;
+ audioSamples = data.length;
+ audioChannels = 1;
+ samplingRate = Math.round(samplingRate / group_size);
+ dataWidth = 2;
+ SAVE();
+ audioSamples = saveSamples;
+ audioChannels = saveChannels;
+ samplingRate = saveRate;
+ dataWidth = saveWidth;
+ }
+ 
+function saveEncoded()
+ {
+ let formatted = new BitStream();
+ for(let i=0; i<raw_enc.length; i++)
+  {
+  formatted.write(raw_enc[i], enc_dataSize);
+  }
+ formatted.writeLast();
+ console.log("File size: " + (formatted.buffer.length / 1048576).toFixed(2) + "MB");
+ const fileBuffer = new Uint8Array(formatted.buffer);
+ const packed = new Blob([fileBuffer]);
+ const fileURL = URL.createObjectURL(packed);
+ id("wavFile").setAttribute("download", loadedName.trim() + "-encoded.bin");
+ id("wavFile").setAttribute("href", fileURL);
+ }
+
+
+function table8()
+ {
+ let result = [];
+ for(let i=0; i<StepSizeTable16.length; i++)
+  {
+  result.push(Math.round(StepSizeTable16[i] / 256));
+  }
+ return result;
+ }
+
+
+function testStream()
+ {
+ let written = [];
+ let writtenRaw = [];
+ let sizes = [];
+ let stream = new BitStream();
+ let writeTime = new Timer();
+ let readTime = new Timer();
+ for(let i=0; i<10000; i++)
+  {
+  let rnd = ((i * 1000000 + 2137) & 0x7FFFFFFF) >>> 0;
+  //let rnd = Math.round(Math.random() * Math.pow(2, 31));
+  let size = Math.max((i & 31), 1);
+  //let size = Math.round(Math.random() * 30 + 1);
+  let mask = (1 << size) - 1;
+  writeTime.start();
+  stream.write(rnd, size);
+  writeTime.stop();
+  writtenRaw.push(rnd);
+  written.push(rnd & mask);
+  sizes.push(size);
+  }
+ console.log("Write took " + writeTime.seconds);
+ stream.writeLast();
+ stream.seek(0);
+ for(let i=0; i<10000; i++)
+  {
+  readTime.start();
+  let read = stream.read(sizes[i]);
+  readTime.stop();
+  if(read != written[i])
+   {
+   console.log("Fail at " + (stream.byteAt * 8 + stream.bitAt) + " (" + i + "). " + read + " instead of " + written[i] + " with size " + sizes[i]);
+   //console.log(writtenRaw);
+   return;
+   }
+  }
+ console.log("Read took " + readTime.seconds);
+ stream.seek(0);
+ for(let i=0; i<10000; i++)
+  {
+  let read = stream.read(sizes[i]);
+  if(read != written[i])
+   {
+   console.log("Fail at " + (stream.byteAt * 8 + stream.bitAt) + ". " + read + " instead of " + written[i] + " (seek error)");
+   return;
+   }
+  }
+ console.log("Test passed");
+ }
+ 
+function scf()
+ {
+ let result = [];
+ let inverse = [];
+ for(let i=0; i<16; i++)
+  {
+  let point = 0.0625 * Math.pow(i + 1, 1.9957) + 3/16;
+  result.push(point);
+  inverse.push(1 / point);
+  //result.push(128 / (i + 1));
+  }
+ console.log(result);
+ console.log(inverse);
+ }
+
+function printTab()
+ {
+ let result = "[\n";
+ for(let i=0; i<4; i++)
+  {
+  let newLineInter = 8 >> i;
+  result += "[";
+  for(let j=0; j<16; j++)
+   {
+   result += "[";
+   for(let k=0; k<1<<(i + 1); k++)
+    {
+	result += dequant_tab[i][j][k] + ((k<(1<<(i + 1))-1) ? ", " : "");
+	}
+   result += ((j<15) ? "]," : "]");
+   if(!((j + 1) % newLineInter) && j < 15){result += "\n";}else if(j < 15){result += " ";}
+   }
+  result += (i<3) ? "],\n\n" : "]";
+  }
+ return result + "];";
+ }
+ 
+function bestPredictor(sizeB, sizeT, predShiftB, predShiftT, updShiftB, updShiftT)
+ {
+ const totalRuns = (sizeT - sizeB + 1) * (predShiftT - predShiftB + 1) * (updShiftT - updShiftB + 1);
+ let runs = 0;
+ let percentBef = 1;
+ let toSort = [];
+ for(let size=sizeB; size<=sizeT; size++)
+  {
+  for(let predictShift=predShiftB; predictShift<=predShiftT; predictShift++)
+   {
+   for(let updateShift=updShiftB; updateShift<=updShiftT; updateShift++)
+    {
+	let result = predict(size, predictShift, updateShift);
+	toSort.push({avgErr: result.totalSum / audioSamples, size, predictShift, updateShift});
+	runs++;
+	let percent = Math.round(runs / totalRuns * 100);
+	if(percent != percentBef)
+	 {
+	 percentBef = percent;
+	 console.log(percent + "%");
+	 }
+	}
+   }
+  console.log("Size " + size + " tested.");
+  }
+ console.log("Sorting...");
+ let switched = false;
+ do  
+  {
+  switched = false;
+  for(let i=0; i<toSort.length-1; i++)
+   {
+   if(toSort[i].avgErr > toSort[i + 1].avgErr)
+    {
+	let tempErr = toSort[i].avgErr;
+	let tempSiz = toSort[i].size;
+	let tempPre = toSort[i].predictShift;
+	let tempUpd = toSort[i].updateShift;
+	toSort[i].avgErr = toSort[i + 1].avgErr;
+	toSort[i].size = toSort[i + 1].size;
+	toSort[i].predictShift = toSort[i + 1].predictShift;
+	toSort[i].updateShift = toSort[i + 1].updateShift;
+	toSort[i + 1].avgErr = tempErr;
+	toSort[i + 1].size = tempSiz;
+	toSort[i + 1].predictShift = tempPre;
+	toSort[i + 1].updateShift = tempUpd;
+	switched = true;
+	}
+   }
+  }
+ while(switched);
+ let sortedBySize = [];
+ for(let i=sizeB; i<=sizeT; i++)
+  {
+  for(let j=0; j<toSort.length; j++)
+   {
+   if(toSort[j].size == i)
+    {
+	sortedBySize.push(toSort[j]);
+	break;
+	}
+   }
+  }
+ return {sortedBySize, all: toSort};
+ }
+
+
+function predict(size, predictShift, updateShift)
+ {
+ const lms = LMS(size, size);
+ for(let i=0; i<size; i++)
+  {
+  lms.weights[i] = 0;
+  }
+ let count = 0;
+ let errors = [];
+ let errSum = 0;
+ let totalSum = 0;
+ for(let i=0; i<audioSamples; i++)
+  {
+  let expected = lms_predict(lms.weights, lms.history, predictShift);
+  let error = samplesL[i] - expected;
+  lms_update(lms.weights, lms.history, samplesL[i], error, updateShift);
+  errSum += error * error; //Math.abs(error);
+  count++;
+  if(count > 2000)
+   {
+   count = 0;
+   errors.push(errSum);
+   totalSum += errSum;
+   errSum = 0;
+   }
+  }
+ return {errors, totalSum};
+ }
+ 
+function lms_predict(weights, history, shift) 
+ {
+ let sum = 0;
+ for(let i=0; i<weights.length; i++)
+  {
+  sum += weights[i] * history[i];
+  }
+ return sum / Math.pow(2, shift);//>> shift;
+ }
+
+function lms_update(weights, history, sample, residual, shift)
+ {
+ let delta = residual >> shift;
+ let size = weights.length;
+ for(let i=0; i<size; i++)
+  {
+  weights[i] += history[i] < 0 ? -delta : delta;
+  }
+ for(let i=0; i<size-1; i++)
+  {
+  history[i] = history[i + 1];
+  }
+ history[size - 1] = sample;
+ }
+
+function normalArray(from)
+ {
+ let result = [];
+ for(let i=0; i<from.length; i++)
+  {
+  result.push(from[i]);
+  }
+ return result;
+ }
+ 
+function getAbsMax(data)
+ {
+ let dataMax = -Infinity;
+ let dataMin = Infinity;
+ for(let v of data)
+  {
+  if(v > dataMax){dataMax = v;}
+  if(v < dataMin){dataMin = v;}
+  }
+ if(dataMin < 0){dataMin = -dataMin;}
+ return dataMax > dataMin ? dataMax : dataMin;
+ }
+ 
+
+</script>
+</head>
+<body onload="run()" style="text-align:center; background-color:#222">
+<input type="file" id="sound" style="margin-top:200px; display:inline-block"/>
+<br/>
+<a href="" download="" id="wavFile" style="margin-top:20px; display:inline-block; margin-left:-100px">Download converted file</a>
+</body>
+</html>
