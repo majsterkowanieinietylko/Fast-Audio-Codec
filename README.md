@@ -10,6 +10,7 @@ FAC encapsulates two encoders and one decoder compatible with both encoders. Res
 # FACts about FAC
 
 - Inspired by <a href="https://en.wikipedia.org/wiki/Adaptive_differential_pulse-code_modulation">ADPCM</a> and <a href="https://github.com/phoboslab/qoa">QOA</a>
+- Optimized for electronic music, sounds the best with it
 - Uses from 1 to 4 bits per quantized sample
 - Fast encoder is faster than QOA and slightly slower than ADPCM
 - Decoder is faster than both ADPCM and QOA
@@ -22,9 +23,10 @@ FAC encapsulates two encoders and one decoder compatible with both encoders. Res
 Files in this package are:
 - <b>FAC.js</b>: Complete Fast Audio Codec software, JavaScript version. Python module written in C coming in the future.
 - <b>QOA-modif.js</b>: Modified QOA codec software, JavaScript version.
-- <b>Codec_tester_html</b>: Basic browser interface for testing FAC, QOA and ADPCM. Just run it in your web browser.
+- <b>Codec_tester.html</b>: Basic browser interface for testing FAC, QOA and ADPCM. Just run it in your web browser.
 - <b>comparison folder</b>: Audio tracks encoded by FAC, ADPCM and QOA. Encoding settings marked in file names, original tracks included.
 
 # Details
 
-- Codec features and usage are described in the comments at the top of each source code.
+Codec features and usage are described in the comments at the top of each source code. I really recommend reading them before looking at the code.
+<b>There is also a detailed <a href="https://youtu.be/2D2Bn-AnXjw">video</a> about FAC's working principle!</b>
