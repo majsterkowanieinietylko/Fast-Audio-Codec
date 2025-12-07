@@ -4,7 +4,7 @@
     
     What MINT added?
     - bits per sample can be in range [1-4], no longer fixed at 3
-    - everything was fine-tuned (and it turnes out that values of most parameters were already close to optimal)
+    - everything was fine-tuned (and it turns out that values of most parameters were already close to optimal)
     
     What MINT removed?
     - some overhead data from frames
