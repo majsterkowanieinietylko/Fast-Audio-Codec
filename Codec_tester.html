@@ -21,7 +21,7 @@
         
     If everything goes right, you will see "Ready for playback." message after processing is done.
     Unfoucus the console (simply click somewhere else on the site) and hit the space to play processed audio.
-    Hit the space again to stop the playback. Audio can be played only once after encoding.
+    Hit the space again to stop the playback, and again to listen once more from the beginning.
     
     Call SAVE() function to convert processed audio into the WAV file. Then click "Download converted file"
     to download it for analyzis / further processing.
@@ -190,8 +190,18 @@ function run()
    {
    if(!previewReady){return;}
    if(event.key != " "){return;}
-   playing ? playBuffer.stop() : playBuffer.start();
-   playing = !playing;
+   if(!playing) {
+    playBuffer.start();
+    playing = true;
+   }
+   else {
+     playBuffer.stop();
+     playing = false;
+     previewReady = false;
+     if(!event.shiftKey) {
+        PLAY(dataWidth * 8);
+     }
+   }
    });
  }
 
@@ -307,7 +317,7 @@ function ADPCM2_16()
   }
  console.log("Encoded in " + Et.seconds);
  console.log("Decoded in " + Dt.seconds);
- console.log("Bitrate: " + Math.round(audioBytes / (8 * 128 * lengthSeconds)) + " kbit/s");
+ console.log("Bitrate: " + Math.round(audioBytes / (8 * 125 * lengthSeconds)) + " kbit/s");
  PLAY(16);
  }
  
@@ -440,7 +450,7 @@ function ADPCM2_8()
   }
  console.log("Encoded in " + Et.seconds);
  console.log("Decoded in " + Dt.seconds);
- console.log("Bitrate: " + Math.round(audioBytes / (4 * 128 * lengthSeconds)) + " kbit/s");
+ console.log("Bitrate: " + Math.round(audioBytes / (4 * 125 * lengthSeconds)) + " kbit/s");
  PLAY(8);
  }
  
@@ -716,7 +726,7 @@ function ADPCM4_16()
   }
  console.log("Encoded in " + Et.seconds);
  console.log("Decoded in " + Dt.seconds);
- console.log("Bitrate: " + Math.round(audioBytes / (4 * 128 * lengthSeconds)) + " kbit/s");
+ console.log("Bitrate: " + Math.round(audioBytes / (4 * 125 * lengthSeconds)) + " kbit/s");
  PLAY(16);
  }
  
@@ -834,7 +844,7 @@ function ADPCM4_8()
   }
  console.log("Encoded in " + Et.seconds);
  console.log("Decoded in " + Dt.seconds);
- console.log("Bitrate: " + Math.round(audioBytes / (2 * 128 * lengthSeconds)) + " kbit/s");
+ console.log("Bitrate: " + Math.round(audioBytes / (2 * 125 * lengthSeconds)) + " kbit/s");
  PLAY(16);
  }
  
@@ -927,7 +937,7 @@ function QOA(BPS)
  let byteSize = encoded.length;
  let ratio = (audioBytes + 44) / byteSize;
  console.log("Encoded size: " + (byteSize / 1048576).toFixed(2) + " MB. Compression ratio: " + ratio.toFixed(2));
- console.log("Bitrate: " + Math.round(byteSize / (128 * lengthSeconds)) + " kbit/s");
+ console.log("Bitrate: " + Math.round(byteSize / (125 * lengthSeconds)) + " kbit/s");
  raw_enc = encoded;
  enc_dataSize = 8;
  console.log("Decoding...");
@@ -965,7 +975,7 @@ function FAC(BPS, quality, analyze)
  let byteSize = encoded.length;
  let ratio = (audioBytes + 44) / byteSize;
  console.log("Encoded size: " + (byteSize / 1048576).toFixed(2) + " MB. Compression ratio: " + ratio.toFixed(2));
- console.log("Bitrate: " + Math.round(byteSize / (128 * lengthSeconds)) + " kbit/s");
+ console.log("Bitrate: " + Math.round(byteSize / (125 * lengthSeconds)) + " kbit/s");
  raw_enc = encoded;
  enc_dataSize = 8;
  console.log("Decoding...");
@@ -1019,7 +1029,7 @@ function FAC(BPS, quality, analyze)
  PLAY(dataWidth * 8);
  return avgError + worst * 0.2;
  }
- 
+
 function best_mapping(BPS) {
 	console.warn("I really recommend you to comment a lot \"console.log()\" before running this...");
 	return;
@@ -1515,7 +1525,6 @@ function getAbsMax(data)
  if(dataMin < 0){dataMin = -dataMin;}
  return dataMax > dataMin ? dataMax : dataMin;
  }
- 
 
 </script>
 </head>
